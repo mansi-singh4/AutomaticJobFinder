@@ -1,0 +1,18 @@
+Mansi Example
+Machine Learning Engineer / AI Engineer
+
+SUMMARY
+- 3+ years building Python services and ML prototypes.
+- Interested in LLM apps, retrieval (RAG), and agent workflows.
+
+SKILLS
+Python, FastAPI, PyTorch, scikit-learn, Pandas, NumPy, SQL, Docker, Kubernetes,
+LangChain, CrewAI, OpenAI APIs, Vector Databases, Git, CI/CD, AWS
+
+EXPERIENCE
+AI Engineer
+- Built LLM-powered summarization and Q&A workflows with evaluation.
+- Deployed FastAPI services, added observability and retries.
+
+PROJECTS
+- JobFinderAgent: multi-agent system to search jobs, match resume, and generate outreach emails.

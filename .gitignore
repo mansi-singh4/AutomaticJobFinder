@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.tmp/
+
+.env
+client_secret.json
+token.json
+
+processed_jobs.json
+*.pyc
