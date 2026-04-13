@@ -156,35 +156,36 @@ def process_job(
         result["risk_score"] = float(risk_score(job.company, job.url))
         logger.info("job title=%s | match score=%s", job.title, result["match_score"])
 
-        result["generated_email"] = write_cold_email(
-            profile=profile, job=job, match=result["match_score"], risk=result["risk_score"]
-        )
-        result["company_email"] = (find_company_email(job.url) or "").strip()
-        logger.info("job title=%s | email target=%s", job.title, result["company_email"] or "none")
-
-        if not result["company_email"]:
-            result["send_status"] = "Skipped ⚠️ (no email target)"
-        elif result["match_score"] < 30:
+        if result["match_score"] < 30:
             result["send_status"] = f"Skipped ⚠️ (match {result['match_score']} < 30)"
         elif result["risk_score"] > 40:
             result["send_status"] = f"Skipped ⚠️ (risk {result['risk_score']} > 40)"
         else:
-            subject, body = _parse_subject_and_body(result["generated_email"])
-            subject = subject or f"Application for {job.title} at {job.company}"
-            send_res = send_email(
-                to_email=result["company_email"],
-                subject=subject,
-                body=body,
-                mode=outreach_mode,
-                gmail_sender=gmail_sender or None,
-                client_secrets_path=client_secrets or None,
-                token_path=token_path or None,
-                attachment_bytes=resume_bytes,
-                attachment_filename=resume_filename or "resume.pdf",
-                attachment_mime="application/pdf" if resume_filename.lower().endswith(".pdf") else "text/plain",
+            result["generated_email"] = write_cold_email(
+                profile=profile, job=job, match=result["match_score"], risk=result["risk_score"]
             )
-            result["send_status"] = "Email Sent ✅"
-            result["send_message_id"] = str(send_res.get("message_id", ""))
+            result["company_email"] = (find_company_email(job.url, job.company, result["match_score"], result["risk_score"]) or "").strip()
+            logger.info("job title=%s | email target=%s", job.title, result["company_email"] or "none")
+
+            if not result["company_email"]:
+                result["send_status"] = "Skipped ⚠️ (no email target)"
+            else:
+                subject, body = _parse_subject_and_body(result["generated_email"])
+                subject = subject or f"Application for {job.title} at {job.company}"
+                send_res = send_email(
+                    to_email=result["company_email"],
+                    subject=subject,
+                    body=body,
+                    mode=outreach_mode,
+                    gmail_sender=gmail_sender or None,
+                    client_secrets_path=client_secrets or None,
+                    token_path=token_path or None,
+                    attachment_bytes=resume_bytes,
+                    attachment_filename=resume_filename or "resume.pdf",
+                    attachment_mime="application/pdf" if resume_filename.lower().endswith(".pdf") else "text/plain",
+                )
+                result["send_status"] = "Email Sent ✅"
+                result["send_message_id"] = str(send_res.get("message_id", ""))
 
         processed_urls[job.url] = time.time()
         _save_processed_jobs(processed_urls)

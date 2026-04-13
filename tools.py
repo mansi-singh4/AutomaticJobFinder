@@ -378,31 +378,150 @@ Body: ...
         )
 
 
-def find_company_email(job_url: str) -> Optional[str]:
+import json
+
+def _load_email_cache() -> dict:
+    if not os.path.exists("emails_cache.json"):
+        return {}
+    try:
+        with open("emails_cache.json", "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+def _save_email_cache(cache: dict):
+    try:
+        with open("emails_cache.json", "w", encoding="utf-8") as f:
+            json.dump(cache, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save email cache: {e}")
+
+def _fetch_hunter_email(domain: str) -> Optional[str]:
+    api_key = os.getenv("HUNTER_API_KEY", "").strip()
+    if not api_key:
+        return None
+        
+    logger.info(f"Calling Hunter API for domain: {domain}")
+    try:
+        time.sleep(1.5)  # Rate limiting delay
+        res = requests.get(
+            f"https://api.hunter.io/v2/domain-search?domain={domain}&api_key={api_key}",
+            timeout=10
+        )
+        if res.status_code == 429:
+            logger.warning("Hunter API quota exceeded.")
+            return None
+        if res.status_code != 200:
+            logger.warning(f"Hunter API error: {res.status_code} {res.text}")
+            return None
+            
+        data = res.json().get("data", {})
+        emails_list = data.get("emails", [])
+        if not emails_list:
+            logger.info("Hunter API returned no emails.")
+            return None
+            
+        valid_emails = []
+        for e in emails_list:
+            val = e.get("value")
+            score = e.get("confidence", 0)
+            if val:
+                valid_emails.append((val, score))
+                
+        if not valid_emails:
+            return None
+            
+        valid_emails.sort(key=lambda x: x[1], reverse=True)
+        
+        generic_roles = ["hr@", "careers@", "hiring@", "jobs@"]
+        for email, score in valid_emails:
+            if any(email.lower().startswith(r) for r in generic_roles):
+                logger.info(f"Hunter API found prefered generic email: {email} (score: {score})")
+                return email
+                
+        best_email = valid_emails[0][0]
+        logger.info(f"Hunter API found email: {best_email} (score: {valid_emails[0][1]})")
+        return best_email
+    except Exception as e:
+        logger.error(f"Hunter API exception: {e}")
+        return None
+
+def find_company_email(job_url: str, company_name: str = "", match_score: float = 0.0, risk_score: float = 0.0) -> Optional[str]:
     if not job_url:
         return None
 
     parsed = urlparse(job_url)
     if not parsed.scheme or not parsed.netloc:
         return None
-    domain = parsed.netloc.replace("www.", "")
+    raw_domain = parsed.netloc.replace("www.", "")
 
-    # Basic domain-based first guess, then verify via pages.
-    guessed = [f"careers@{domain}", f"jobs@{domain}", f"hr@{domain}"]
+    ats_platforms = {
+        "lever.co", "greenhouse.io", "workable.com", "bamboohr.com", "ashbyhq.com", "breezy.hr"
+    }
+    
+    job_boards = {
+        "linkedin.com", "workday.com", "myworkdayjobs.com", "icims.com", "indeed.com", 
+        "glassdoor.com", "ycombinator.com", "angel.co", "wellfound.com", "smartrecruiters.com"
+    }
+
+    is_ats = any(b in raw_domain for b in ats_platforms)
+    is_job_board = any(b in raw_domain for b in job_boards)
+    
+    domain = raw_domain
+    if is_ats:
+        path_parts = [p for p in parsed.path.split('/') if p and len(p) > 2 and p.lower() not in {"jobs", "careers", "openings", "companies"}]
+        identifier = path_parts[0] if path_parts else company_name.lower().replace(" ", "")
+        if identifier:
+            domain = f"{identifier}.com"
+            logger.info(f"Derived domain {domain} from ATS URL {job_url}")
+        else:
+            is_job_board = True
+    elif is_job_board:
+        if company_name and len(company_name) > 3:
+            domain = f"{''.join(c for c in company_name.lower() if c.isalnum())}.com"
+            logger.info(f"Derived domain {domain} from job board {job_url} using company name")
+            is_job_board = False # allow hunting
+    
+    use_hunter = False
+    if domain and not (any(b in domain for b in job_boards) or any(b in domain for b in ats_platforms)):
+        if match_score >= 60 and risk_score <= 40:
+            use_hunter = True
+
+    if use_hunter:
+        cache = _load_email_cache()
+        if domain in cache:
+            logger.info(f"Using cached email for {domain}")
+            return cache[domain]
+            
+        hunter_email = _fetch_hunter_email(domain)
+        if hunter_email:
+            cache[domain] = hunter_email
+            _save_email_cache(cache)
+            return hunter_email
+    
+    cname = "".join(c for c in company_name.lower() if c.isalnum()) if company_name else ""
+
+    guessed = []
+    is_valid_domain = not (is_ats or is_job_board)
+    if is_valid_domain or (domain and domain != raw_domain):
+        target_domain = domain if domain != raw_domain else raw_domain
+        guessed = [f"careers@{target_domain}", f"jobs@{target_domain}", f"hr@{target_domain}"]
 
     base = f"{parsed.scheme}://{parsed.netloc}"
-    candidates = [job_url, urljoin(base, "/contact"), urljoin(base, "/contact-us")]
+    candidates = [job_url]
+    if is_valid_domain:
+        candidates.extend([urljoin(base, "/contact"), urljoin(base, "/contact-us")])
+        
     for url in candidates:
         html = _fetch_html(url)
         if not html:
             continue
         emails = _extract_emails(html)
-        pick = _pick_best_email(emails)
+        pick = _pick_best_email(emails, cname, domain if is_valid_domain else None)
         if pick:
             return pick
 
-    # Return best-effort domain-based candidate
-    return guessed[0]
+    return guessed[0] if guessed else None
 
 
 def _fetch_html(url: str) -> str:
@@ -426,17 +545,50 @@ def _extract_emails(html: str) -> List[str]:
                     emails.add(mail)
         except Exception:
             pass
-    return sorted(emails)
+            
+    filtered = []
+    ignored = [
+        "sentry", "noreply", "no-reply", "example.com", "test.com", "yourdomain.com",
+        "w3.org", ".png", ".jpg", ".jpeg", ".gif", "mydomain.com", "do-not-reply",
+        "github.com", "email.com", "privacy", "notion.site", "sift"
+    ]
+    for e in emails:
+        el = e.lower()
+        if not any(ign in el for ign in ignored) and "@" in el:
+            filtered.append(e)
+            
+    return sorted(filtered)
 
 
-def _pick_best_email(emails: List[str]) -> Optional[str]:
+def _pick_best_email(emails: List[str], company_name: str = "", domain: str = "") -> Optional[str]:
     if not emails:
         return None
-    preferred = ["careers@", "jobs@", "hr@", "talent@", "recruiting@", "people@"]
-    for p in preferred:
+        
+    preferred_prefixes = [
+        "careers@", "jobs@", "hr@", "talent@", "recruiting@", "people@",
+        "hiring@", "contact@", "info@", "hello@", "support@"
+    ]
+    
+    # 1. First try: Exact prefix + domain or company name match
+    for p in preferred_prefixes:
+        for e in emails:
+            el = e.lower()
+            if el.startswith(p):
+                if domain and domain in el: return e
+                if company_name and len(company_name) > 3 and company_name in el: return e
+
+    # 2. Try any prefix if it matches
+    for p in preferred_prefixes:
         for e in emails:
             if e.lower().startswith(p):
                 return e
+                
+    # 3. Domain or company match for anything
+    for e in emails:
+        el = e.lower()
+        if domain and domain in el: return e
+        if company_name and len(company_name) > 3 and company_name in el: return e
+
     return emails[0]
 
 
